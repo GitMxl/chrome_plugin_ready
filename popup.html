@@ -10,6 +10,18 @@
   <h1>全部图片屏蔽</h1>
   <label class="toggle"><span>启用图片屏蔽</span><input id="enabled" type="checkbox" role="switch" disabled></label>
   <p id="status" role="status">正在读取设置…</p>
+  <label class="field" for="strength">屏蔽强度</label>
+  <select id="strength" disabled>
+    <option value="basic">仅屏蔽普通图片</option>
+    <option value="strict">严格模式（拦截下载及装饰图片）</option>
+  </select>
+  <p class="hint">普通模式保留背景图、图片按钮和装饰图标，图片仍会下载。严格模式同时隐藏这些图片，可能影响部分网站操作。切换后请刷新网页。</p>
+  <label class="field" for="layout">图片布局</label>
+  <select id="layout" disabled>
+    <option value="preserve">保留布局</option>
+    <option value="collapse">折叠空白</option>
+  </select>
+  <p class="hint">保留布局维持图片原有空间；折叠空白将普通图片收起为小型查看按钮。网站容器自身的固定高度和留白可能保留。</p>
   <label class="field" for="site-mode">过滤范围</label>
   <select id="site-mode" disabled>
     <option value="exclude">屏蔽所有网站，列表中的除外</option>
@@ -26,7 +38,7 @@
   <textarea id="sites" rows="4" placeholder="example.com&#10;news.example.org" spellcheck="false" disabled></textarea>
   <p class="hint">每行一个域名或网址，自动包含子域名。删除对应行并保存即可移除规则。</p>
   <button id="save-sites" type="button" disabled>保存网站列表</button>
-  <p class="hint">图片位置的「显示图片」按钮可单独查看图片。背景图仍被屏蔽。关闭屏蔽后请刷新网页。</p>
+  <p class="hint">图片位置的「显示图片」按钮可单独查看图片。严格模式下背景图仍被屏蔽。关闭屏蔽后请刷新网页。</p>
   <button id="reload" class="secondary" type="button" disabled>刷新当前网页</button>
   <p class="hint">首次安装后，请刷新已打开的网页。浏览器内置页面及扩展商店不支持屏蔽。</p>
   <script src="settings.js"></script>

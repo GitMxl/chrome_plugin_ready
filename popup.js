@@ -3,6 +3,8 @@ const toggle = document.getElementById("enabled");
 const status = document.getElementById("status");
 const reload = document.getElementById("reload");
 const mode = document.getElementById("site-mode");
+const strength = document.getElementById("strength");
+const layout = document.getElementById("layout");
 const sites = document.getElementById("sites");
 const sitesLabel = document.getElementById("sites-label");
 const currentSite = document.getElementById("current-site");
@@ -10,7 +12,7 @@ const siteStatus = document.getElementById("site-status");
 const addCurrent = document.getElementById("add-current");
 const saveSites = document.getElementById("save-sites");
 const temporaryTab = document.getElementById("temporary-tab");
-const controls = [toggle, mode, sites, addCurrent, saveSites, reload, temporaryTab];
+const controls = [toggle, mode, strength, layout, sites, addCurrent, saveSites, reload, temporaryTab];
 let temporarilyAllowed = false;
 let settings;
 let tab;
@@ -19,6 +21,8 @@ let host = "";
 function render() {
   toggle.checked = settings.enabled;
   mode.value = settings.siteMode;
+  strength.value = settings.strength;
+  layout.value = settings.layout;
   sites.value = settings.sites.join("\n");
   sitesLabel.textContent = settings.siteMode === "only" ? "屏蔽的网站" : "不屏蔽的网站";
   status.textContent = settings.enabled ? "图片屏蔽已开启" : "图片屏蔽已暂停，网站规则已保留";
@@ -40,7 +44,7 @@ function updateAddButton() {
 }
 
 function readForm() {
-  return { enabled: toggle.checked, siteMode: mode.value, sites: Settings.parseSites(sites.value) };
+  return { enabled: toggle.checked, siteMode: mode.value, strength: strength.value, layout: layout.value, sites: Settings.parseSites(sites.value) };
 }
 
 async function save(addHost = false) {
@@ -88,6 +92,8 @@ Promise.all([
 
 toggle.addEventListener("change", () => save());
 mode.addEventListener("change", () => save());
+strength.addEventListener("change", () => save());
+layout.addEventListener("change", () => save());
 sites.addEventListener("input", updateAddButton);
 saveSites.addEventListener("click", () => save());
 addCurrent.addEventListener("click", () => save(true));

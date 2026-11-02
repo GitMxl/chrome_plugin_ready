@@ -1,10 +1,13 @@
 (() => {
   // Visibility preserves layout and suppresses broken-image icons and alt text.
   // The universal rules also cover dynamically added elements and pseudo-elements.
-  const css = `
-    img:not([data-image-filter-revealed]), input[type="image"], svg image {
+  const basicCss = `
+    img:not([data-image-filter-revealed]) {
       visibility: hidden !important;
     }
+  `;
+  const strictCss = basicCss + `
+    input[type="image"], svg image { visibility: hidden !important; }
     *, *::before, *::after, *::marker {
       background-image: none !important;
       border-image-source: none !important;
@@ -16,15 +19,20 @@
   `;
   // Resolve the top-level site's policy before hiding anything in an allowed site.
   let enabled = false;
+  let strength = "strict";
+  let layout = "preserve";
   const roots = new Map();
 
   function addStyle(root) {
     let style = roots.get(root);
     if (!style) {
       style = document.createElement("style");
-      style.textContent = css;
       roots.set(root, style);
     }
+    const collapseSelector = strength === "basic" ? 'img:not([data-image-filter-revealed])' : 'img:not([data-image-filter-revealed]), input[type="image"], svg image';
+    const css = (strength === "basic" ? basicCss : strictCss) +
+      (layout === "collapse" ? `${collapseSelector} { display: none !important; }` : "");
+    if (style.textContent !== css) style.textContent = css;
     const parent = root === document ? document.documentElement : root;
     if (enabled && parent && style.parentNode !== parent) parent.appendChild(style);
     if (!enabled) style.remove();
@@ -66,9 +74,11 @@
     }
   }
 
-  function setEnabled(value) {
+  function setEnabled(value, nextStrength, nextLayout) {
     enabled = value !== false;
-    ImageRevealControls.setEnabled(enabled);
+    strength = nextStrength === "basic" ? "basic" : "strict";
+    layout = nextLayout === "collapse" ? "collapse" : "preserve";
+    ImageRevealControls.setEnabled(enabled, layout);
     for (const root of roots.keys()) addStyle(root);
   }
 
@@ -79,7 +89,7 @@
     const current = ++revision;
     try {
       const policy = await chrome.runtime.sendMessage({ type: "getImagePolicy" });
-      if (current === revision && typeof policy?.enabled === "boolean") setEnabled(policy.enabled);
+      if (current === revision && typeof policy?.enabled === "boolean") setEnabled(policy.enabled, policy.strength, policy.layout);
     } catch (error) {
       console.error("无法读取图片屏蔽设置", error);
     }

@@ -1,7 +1,9 @@
 (() => {
   const roots = new Set();
   const buttons = new Map();
+  const anchors = new Map();
   let enabled = false;
+  let layout = "preserve";
   let scheduled = false;
   let panel;
   let host;
@@ -13,6 +15,14 @@
   }
   const resize = new ResizeObserver(schedule);
   const observer = new MutationObserver(schedule);
+
+  function removeAnchor(image) {
+    const anchor = anchors.get(image);
+    if (!anchor) return;
+    resize.unobserve(anchor);
+    anchor.remove();
+    anchors.delete(image);
+  }
 
   function createPanel() {
     if (panel || !document.documentElement) return;
@@ -42,6 +52,7 @@
       const attributes = [image, ...sources].map(element => [element, element.getAttribute("srcset")]);
       for (const [element] of attributes) element.removeAttribute("srcset");
       image.setAttribute("data-image-filter-revealed", "");
+      removeAnchor(image);
       image.style.setProperty("visibility", "visible", "important");
       image.loading = "eager";
       // Assigning src again retries requests previously rejected by the blocker.
@@ -79,6 +90,7 @@
     for (const [image, button] of buttons) {
       if (!enabled || !image.isConnected || image.hasAttribute("data-image-filter-revealed")) {
         button.remove();
+        removeAnchor(image);
         resize.unobserve(image);
         buttons.delete(image);
       }
@@ -104,8 +116,24 @@
       }
     }
     for (const [image, button] of buttons) {
-      const rect = image.getBoundingClientRect();
-      const visible = image.getClientRects().length && rect.bottom >= 0 && rect.right >= 0 && rect.top < innerHeight && rect.left < innerWidth;
+      let target = image;
+      if (layout === "collapse") {
+        let anchor = anchors.get(image);
+        if (!anchor) {
+          anchor = document.createElement("span");
+          anchor.setAttribute("aria-hidden", "true");
+          anchor.setAttribute("data-image-filter-anchor", "");
+          anchor.style.cssText = "all:initial!important;display:inline-block!important;width:76px!important;height:24px!important;margin:0!important;padding:0!important;border:0!important;vertical-align:middle!important;pointer-events:none!important;visibility:hidden!important;";
+          anchors.set(image, anchor);
+          resize.observe(anchor);
+        }
+        if (anchor.parentNode !== image.parentNode || anchor.nextSibling !== image) image.before(anchor);
+        target = anchor;
+      } else {
+        removeAnchor(image);
+      }
+      const rect = target.getBoundingClientRect();
+      const visible = target.getClientRects().length && rect.bottom >= 0 && rect.right >= 0 && rect.top < innerHeight && rect.left < innerWidth;
       button.hidden = !visible;
       if (visible) {
         button.style.left = `${Math.max(0, rect.left)}px`;
@@ -123,6 +151,6 @@
       observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcset", "class", "style", "hidden"] });
       schedule();
     },
-    setEnabled(value) { enabled = value; schedule(); }
+    setEnabled(value, nextLayout) { enabled = value; layout = nextLayout; schedule(); }
   };
 })();

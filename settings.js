@@ -1,5 +1,5 @@
 (() => {
-  const keys = ["enabled", "siteMode", "sites"];
+  const keys = ["enabled", "siteMode", "sites", "strength", "layout"];
   const maxSites = 500;
 
   function normalizeSite(value) {
@@ -34,7 +34,9 @@
         if (!sites.includes(host) && sites.length < maxSites) sites.push(host);
       } catch { /* Ignore corrupt stored entries instead of disabling all rules. */ }
     }
-    return { enabled: value.enabled !== false, siteMode: value.siteMode === "only" ? "only" : "exclude", sites };
+    return { enabled: value.enabled !== false, siteMode: value.siteMode === "only" ? "only" : "exclude", sites,
+      strength: value.strength === "basic" ? "basic" : "strict",
+      layout: value.layout === "collapse" ? "collapse" : "preserve" };
   }
 
   function hostname(url) {
@@ -56,7 +58,8 @@
   }
 
   function rules(settings) {
-    if (!settings.enabled || (settings.siteMode === "only" && !settings.sites.length)) return [];
+    // Network image requests do not distinguish inline content from CSS icons.
+    if (!settings.enabled || settings.strength === "basic" || (settings.siteMode === "only" && !settings.sites.length)) return [];
     const condition = { urlFilter: "*", resourceTypes: ["image"] };
     if (settings.sites.length) {
       // Match the top-level website, not the image CDN or an embedded frame.

@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "全部图片屏蔽",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "minimum_chrome_version": "145",
-  "description": "屏蔽网页图片和背景图，支持仅屏蔽指定网站或排除指定网站，可随时切换。",
+  "description": "支持普通和严格两档图片屏蔽、网站规则、标签页临时放行与单张图片查看。",
   "permissions": ["storage", "declarativeNetRequest", "activeTab"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "全部图片屏蔽", "default_popup": "popup.html" },

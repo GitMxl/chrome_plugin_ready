@@ -19,8 +19,12 @@ for (const file of [manifest.background.service_worker, manifest.action.default_
   assert.ok(fs.existsSync(new URL(`../${file}`, import.meta.url)), `Missing ${file}`);
 }
 
-assert.deepEqual(plain(Settings.normalize()), { enabled: true, siteMode: 'exclude', sites: [] });
-assert.deepEqual(plain(Settings.normalize({ enabled: false })), { enabled: false, siteMode: 'exclude', sites: [] });
+assert.deepEqual(plain(Settings.normalize()), { enabled: true, siteMode: 'exclude', sites: [], strength: 'strict', layout: 'preserve' });
+assert.deepEqual(plain(Settings.normalize({ enabled: false })), { enabled: false, siteMode: 'exclude', sites: [], strength: 'strict', layout: 'preserve' });
+assert.equal(Settings.normalize({ layout: 'invalid' }).layout, 'preserve');
+assert.equal(Settings.normalize({ layout: 'collapse' }).layout, 'collapse');
+assert.equal(Settings.normalize({ strength: 'invalid' }).strength, 'strict');
+assert.deepEqual(plain(Settings.rules(Settings.normalize({ strength: 'basic' }))), []);
 assert.equal(Settings.normalizeSite('https://EXAMPLE.com:8080/path?q=1'), 'example.com');
 assert.equal(Settings.normalizeSite('*.example.com'), 'example.com');
 assert.equal(Settings.normalizeSite('example.com.'), 'example.com');
@@ -144,6 +148,12 @@ bg.failNext();
 await bg.save(only);
 await bg.listeners.start();
 assert.equal(bg.rules.length, 1, 'queue recovers after an API error');
+assert.equal((await bg.save({ enabled: true, strength: 'basic' })).settings.strength, 'basic');
+assert.deepEqual(bg.rules, [], 'basic mode permits background and icon downloads');
+assert.equal((await bg.message({ type: 'getImagePolicy' }, { frameId: 0, url: 'https://example.com/' })).strength, 'basic');
+assert.equal((await background(bg.stored)).stored.strength, 'basic', 'strength survives restart');
+await bg.message({ type: 'revealImage', url: 'https://cdn.test/one.png' }, { tab: { id: 7 } });
+assert.equal(bg.sessionRules.length, 0, 'basic reveal needs no network exception');
 
 await bg.save({ enabled: true, sites: [], siteMode: 'exclude' });
 const tabSender = { frameId: 0, tab: { id: 7, url: 'https://example.com/' }, url: 'https://example.com/' };
@@ -214,6 +224,28 @@ async function content() {
   old({ enabled: false });
   await flush();
   assert.equal(styles[0].parentNode, html, 'out-of-order policy replies cannot revert the latest policy');
+  change({ strength: {} }, 'local');
+  replies.shift()({ enabled: true, strength: 'basic' });
+  await flush();
+  assert.match(styles[0].textContent, /img:not/);
+  assert.doesNotMatch(styles[0].textContent, /background-image|content: none|input\[type|svg image/);
+  change({ strength: {} }, 'local');
+  replies.shift()({ enabled: true, strength: 'strict' });
+  await flush();
+  assert.match(styles[0].textContent, /background-image: none/);
+  change({ layout: {} }, 'local');
+  replies.shift()({ enabled: true, strength: 'basic', layout: 'collapse' });
+  await flush();
+  assert.match(styles[0].textContent, /display: none !important/);
+  assert.doesNotMatch(styles[0].textContent, /input\[type|svg image/);
+  change({ layout: {} }, 'local');
+  replies.shift()({ enabled: true, strength: 'strict', layout: 'collapse' });
+  await flush();
+  assert.match(styles[0].textContent, /input\[type="image"\], svg image;?/);
+  change({ layout: {} }, 'local');
+  replies.shift()({ enabled: true, strength: 'strict', layout: 'preserve' });
+  await flush();
+  assert.doesNotMatch(styles[0].textContent, /display: none/);
 }
 await content();
 
@@ -249,9 +281,17 @@ async function popup(url = 'https://www.example.com/page') {
 }
 const ui = await popup();
 const el = id => ui.elements.get(id);
+assert.equal(el('strength').value, 'strict');
+assert.equal(el('layout').value, 'preserve');
+el('layout').value = 'collapse';
+await el('layout').handlers.change();
+assert.equal(ui.saves.at(-1).layout, 'collapse');
+el('strength').value = 'basic';
+await el('strength').handlers.change();
+assert.equal(ui.saves.at(-1).strength, 'basic');
 assert.equal(el('current-site').textContent, 'www.example.com');
 await el('add-current').handlers.click();
-assert.deepEqual(ui.saves[0].sites, ['www.example.com']);
+assert.deepEqual(ui.saves.at(-1).sites, ['www.example.com']);
 assert.equal(el('add-current').disabled, true);
 el('site-mode').value = 'only';
 await el('site-mode').handlers.change();

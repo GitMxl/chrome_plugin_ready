@@ -25,6 +25,9 @@ const server = http.createServer((request, response) => {
     <img id="network" width="120" height="80" src="http://cdn.test:${port}/pixel.png?${frame ? 'frame' : 'main'}">
     <img id="inline" width="120" height="80" src="data:image/png;base64,${png.toString('base64')}">
     <div id="background" style="width:50px;height:50px;background-image:url(http://cdn.test:${port}/pixel.png?background)">background</div>
+    <input id="image-button" type="image" width="32" height="32" src="http://cdn.test:${port}/pixel.png?button">
+    <style>#decoration::before { content: '装饰'; background-image: url(http://cdn.test:${port}/pixel.png?decoration); }</style>
+    <span id="decoration"></span>
     ${frame ? '' : `<iframe src="http://frame.test:${port}/frame"></iframe>`}
     <script>
     ${frame ? `const report = () => parent.postMessage({kind:'frame', visibility:getComputedStyle(document.getElementById('inline')).visibility, width:document.getElementById('network').naturalWidth}, '*');
@@ -100,12 +103,12 @@ try {
   await until(() => evaluate(workerSession, 'typeof synchronize === "function"'), 'background startup');
   async function settings(value) {
     return evaluate(workerSession, `(async () => {
-      await chrome.storage.local.set(${JSON.stringify(value)});
+      await chrome.storage.local.set(${JSON.stringify({ strength: 'strict', layout: 'preserve', ...value })});
       await synchronize();
       return chrome.declarativeNetRequest.getDynamicRules();
     })()`);
   }
-  async function checkPage(host, blocked) {
+  async function checkPage(host, blocked, networkBlocked = blocked) {
     const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
     const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
     await send('Page.enable', {}, sessionId);
@@ -116,11 +119,15 @@ try {
     const state = await evaluate(sessionId, `({
       width: document.getElementById('network').naturalWidth,
       background: getComputedStyle(document.getElementById('background')).backgroundImage,
+      buttonVisibility: getComputedStyle(document.getElementById('image-button')).visibility,
+      decoration: getComputedStyle(document.getElementById('decoration'), '::before').content,
       frame: window.frameResult
     })`);
-    assert.equal(state.width, blocked ? 0 : 1, `${host}: CDN network image`);
-    assert.equal(state.frame.width, blocked ? 0 : 1, `${host}: cross-origin iframe image`);
-    assert.equal(state.background === 'none', blocked, `${host}: background style`);
+    assert.equal(state.width, networkBlocked ? 0 : 1, `${host}: CDN network image`);
+    assert.equal(state.frame.width, networkBlocked ? 0 : 1, `${host}: cross-origin iframe image`);
+    assert.equal(state.background === 'none', networkBlocked, `${host}: background style`);
+    assert.equal(state.buttonVisibility, networkBlocked ? 'hidden' : 'visible', `${host}: image button`);
+    assert.equal(state.decoration === 'none', networkBlocked, `${host}: pseudo-element decoration`);
     await send('Target.closeTarget', { targetId });
   }
   const onlyRules = await settings({ enabled: true, siteMode: 'only', sites: ['blocked.test'] });
@@ -129,6 +136,12 @@ try {
   await checkPage('sub.blocked.test', true);
   await checkPage('notblocked.test', false);
   await checkPage('allowed.test', false);
+  assert.deepEqual(await settings({ enabled: true, siteMode: 'only', sites: ['blocked.test'], strength: 'basic' }), []);
+  await checkPage('blocked.test', true, false);
+  await checkPage('allowed.test', false);
+  await settings({ enabled: true, siteMode: 'exclude', sites: ['blocked.test'], strength: 'basic' });
+  await checkPage('blocked.test', false);
+  await checkPage('allowed.test', true, false);
   const excludeRules = await settings({ enabled: true, siteMode: 'exclude', sites: ['blocked.test'] });
   assert.deepEqual(excludeRules[0].condition.excludedTopDomains, ['blocked.test']);
   await checkPage('blocked.test', false);
@@ -144,6 +157,18 @@ try {
   const { sessionId: revealSession } = await send('Target.attachToTarget', { targetId: revealId, flatten: true });
   await until(() => evaluate(revealSession, `document.getElementById('network') && getComputedStyle(document.getElementById('network')).visibility === 'hidden'`), 'single image initially blocked');
   await send('DOM.enable', {}, revealSession);
+  const changeLayout = (layout, strength = 'strict', enabled = true) => settings({ enabled, siteMode: 'exclude', sites: [], layout, strength });
+  await changeLayout('collapse');
+  await until(() => evaluate(revealSession, `document.getElementById('network').getBoundingClientRect().height === 0 && document.querySelectorAll('[data-image-filter-anchor]').length === 2`), 'collapse removes image space and retains compact controls');
+  assert.equal(await evaluate(revealSession, `document.getElementById('image-button').getBoundingClientRect().height`), 0, 'strict collapse also removes image buttons');
+  await changeLayout('preserve');
+  await until(() => evaluate(revealSession, `document.getElementById('inline').getBoundingClientRect().height === 80 && document.querySelectorAll('[data-image-filter-anchor]').length === 0`), 'preserve restores original space and removes compact anchors');
+  await changeLayout('collapse', 'basic');
+  await until(() => evaluate(revealSession, `document.getElementById('network').getBoundingClientRect().height === 0 && document.getElementById('image-button').getBoundingClientRect().height === 32`), 'basic collapse keeps functional image buttons');
+  await changeLayout('collapse', 'strict', false);
+  await until(() => evaluate(revealSession, `document.getElementById('inline').getBoundingClientRect().height === 80 && document.querySelectorAll('[data-image-filter-anchor]').length === 0 && getComputedStyle(document.getElementById('inline')).visibility === 'visible'`), 'disabling restores layout and cleans anchors');
+  await changeLayout('collapse');
+  await until(() => evaluate(revealSession, `document.querySelectorAll('[data-image-filter-anchor]').length === 2`), 'collapse restored for individual reveal');
   async function clickReveal(index = 0) {
     const node = await until(async () => {
       const { root } = await send('DOM.getDocument', { depth: -1, pierce: true }, revealSession);
@@ -161,6 +186,8 @@ try {
   }
   await clickReveal();
   await until(() => evaluate(revealSession, `document.getElementById('network').naturalWidth === 1 && getComputedStyle(document.getElementById('network')).visibility === 'visible'`), 'clicked image loads and becomes visible');
+  assert.equal(await evaluate(revealSession, `document.getElementById('network').getBoundingClientRect().height`), 80, 'revealed image recovers full height');
+  assert.equal(await evaluate(revealSession, `document.getElementById('inline').getBoundingClientRect().height`), 0, 'other image stays collapsed');
   assert.equal(await evaluate(revealSession, `getComputedStyle(document.getElementById('inline')).visibility`), 'hidden', 'other image stays hidden');
   assert.equal(await evaluate(revealSession, `getComputedStyle(document.getElementById('background')).backgroundImage`), 'none');
   await clickReveal();
@@ -171,6 +198,7 @@ try {
     document.body.appendChild(picture);
   })()`);
   await until(() => evaluate(revealSession, `document.getElementById('responsive').currentSrc.includes('responsive') && getComputedStyle(document.getElementById('responsive')).visibility === 'hidden'`), 'dynamic responsive image blocked');
+  assert.equal(await evaluate(revealSession, `document.getElementById('responsive').getBoundingClientRect().height`), 0, 'dynamic responsive image collapses');
   await clickReveal();
   await until(() => evaluate(revealSession, `document.getElementById('responsive').naturalWidth === 1 && getComputedStyle(document.getElementById('responsive')).visibility === 'visible'`), 'responsive candidate reveal');
   await evaluate(revealSession, `(() => {
@@ -185,12 +213,24 @@ try {
   await evaluate(workerSession, `sessionChange(() => addSessionRule({ tabIds: [${tabId}], resourceTypes: ['image'] }, 3))`);
   await send('Page.reload', {}, revealSession);
   await until(() => evaluate(revealSession, `document.readyState === 'complete' && document.getElementById('network')?.naturalWidth === 1 && getComputedStyle(document.getElementById('inline')).visibility === 'visible' && window.frameResult?.width === 1`), 'temporary tab allowance and frames after reload');
+  assert.equal(await evaluate(revealSession, `document.getElementById('inline').getBoundingClientRect().height`), 80, 'temporary allowance bypasses collapse');
   await checkPage('allowed.test', true);
   await send('Target.closeTarget', { targetId: revealId });
   await until(() => evaluate(workerSession, `(async () => (await tabRules(${tabId})).length === 0)()`), 'tab closure cleans exceptions');
   const { targetId: popupId } = await send('Target.createTarget', { url: worker.url.replace('background.js', 'popup.html') });
   const { sessionId: popupSession } = await send('Target.attachToTarget', { targetId: popupId, flatten: true });
   await until(() => evaluate(popupSession, `!!document.getElementById('sites') && !document.getElementById('sites').disabled`), 'popup initialization');
+  await evaluate(popupSession, `document.getElementById('layout').value = 'collapse'; document.getElementById('layout').dispatchEvent(new Event('change'));`);
+  await until(() => evaluate(workerSession, `(async () => (await chrome.storage.local.get('layout')).layout === 'collapse')()`), 'popup saves collapse layout');
+  await until(() => evaluate(popupSession, `!document.getElementById('layout').disabled`), 'layout save complete');
+  await send('Page.reload', {}, popupSession);
+  await until(() => evaluate(popupSession, `document.getElementById('layout')?.value === 'collapse' && !document.getElementById('layout').disabled`), 'layout persists after popup reopens');
+  await evaluate(popupSession, `document.getElementById('strength').value = 'basic'; document.getElementById('strength').dispatchEvent(new Event('change'));`);
+  await until(() => evaluate(workerSession, `(async () => (await chrome.storage.local.get('strength')).strength === 'basic' && (await chrome.declarativeNetRequest.getDynamicRules()).length === 0)()`), 'popup basic strength save');
+  await until(() => evaluate(popupSession, `!document.getElementById('strength').disabled`), 'strength save complete');
+  await evaluate(popupSession, `document.getElementById('strength').value = 'strict'; document.getElementById('strength').dispatchEvent(new Event('change'));`);
+  await until(() => evaluate(workerSession, `(async () => (await chrome.storage.local.get('strength')).strength === 'strict' && (await chrome.declarativeNetRequest.getDynamicRules()).length === 1)()`), 'popup strict strength restoration');
+  await until(() => evaluate(popupSession, `!document.getElementById('strength').disabled`), 'strict save complete');
   await evaluate(popupSession, `document.getElementById('sites').value = 'blocked.test'; document.getElementById('site-mode').value = 'only'; document.getElementById('save-sites').click();`);
   await until(() => evaluate(popupSession, `document.getElementById('status').textContent.includes('设置已保存')`), 'real popup save');
   assert.equal((await evaluate(workerSession, 'chrome.storage.local.get("siteMode")')).siteMode, 'only');
