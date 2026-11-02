@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>全部图片屏蔽</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>全部图片屏蔽</h1>
+  <label class="toggle"><span>启用图片屏蔽</span><input id="enabled" type="checkbox" role="switch" disabled></label>
+  <p id="status" role="status">正在读取设置…</p>
+  <label class="field" for="site-mode">过滤范围</label>
+  <select id="site-mode" disabled>
+    <option value="exclude">屏蔽所有网站，列表中的除外</option>
+    <option value="only">仅屏蔽列表中的网站</option>
+  </select>
+  <div class="current-site">
+    <p id="current-site">正在读取当前网站…</p>
+    <p id="site-status" class="hint"></p>
+    <button id="temporary-tab" class="secondary" type="button" disabled>临时放行当前标签页</button>
+    <p class="hint">仅当前标签页有效，关闭标签页后失效。点击后自动刷新网页。</p>
+    <button id="add-current" class="secondary" type="button" disabled>添加当前网站到列表</button>
+  </div>
+  <label class="field" id="sites-label" for="sites">不屏蔽的网站</label>
+  <textarea id="sites" rows="4" placeholder="example.com&#10;news.example.org" spellcheck="false" disabled></textarea>
+  <p class="hint">每行一个域名或网址，自动包含子域名。删除对应行并保存即可移除规则。</p>
+  <button id="save-sites" type="button" disabled>保存网站列表</button>
+  <p class="hint">图片位置的「显示图片」按钮可单独查看图片。背景图仍被屏蔽。关闭屏蔽后请刷新网页。</p>
+  <button id="reload" class="secondary" type="button" disabled>刷新当前网页</button>
+  <p class="hint">首次安装后，请刷新已打开的网页。浏览器内置页面及扩展商店不支持屏蔽。</p>
+  <script src="settings.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { box-sizing: border-box; width: 360px; margin: 0; padding: 18px; font-size: 14px; }
+h1 { font-size: 20px; margin: 0 0 22px; }
+.toggle { display: flex; align-items: center; justify-content: space-between; gap: 20px; font-weight: 600; cursor: pointer; }
+input[type="checkbox"] { width: 21px; height: 21px; accent-color: #2563eb; cursor: pointer; }
+#status { color: #2563eb; margin-top: 18px; }
+.hint { opacity: .7; font-size: 12px; line-height: 1.7; }
+button { width: 100%; margin: 8px 0; border: 0; border-radius: 8px; padding: 11px; background: #2563eb; color: white; font: inherit; cursor: pointer; }
+.field { display: block; font-weight: 600; margin: 16px 0 8px; }
+select, textarea { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #94a3b8; border-radius: 8px; background: Canvas; color: CanvasText; font: inherit; }
+textarea { resize: vertical; min-height: 100px; }
+.current-site { margin: 14px 0; padding: 12px; border: 1px solid #94a3b8; border-radius: 8px; }
+#current-site { margin: 0; overflow-wrap: anywhere; font-weight: 600; }
+.current-site .hint { margin: 6px 0; }
+.secondary { background: transparent; color: inherit; border: 1px solid #94a3b8; }
+button:disabled { opacity: .6; cursor: default; }
+:focus-visible { outline: 3px solid #60a5fa; outline-offset: 3px; }
+@media (prefers-color-scheme: dark) { #status { color: #93c5fd; } }

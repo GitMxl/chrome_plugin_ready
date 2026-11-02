@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "全部图片屏蔽",
+  "version": "1.2.0",
+  "minimum_chrome_version": "145",
+  "description": "屏蔽网页图片和背景图，支持仅屏蔽指定网站或排除指定网站，可随时切换。",
+  "permissions": ["storage", "declarativeNetRequest", "activeTab"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "全部图片屏蔽", "default_popup": "popup.html" },
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["settings.js", "reveal.js", "content.js"],
+    "run_at": "document_start",
+    "all_frames": true,
+    "match_about_blank": true,
+    "match_origin_as_fallback": true
+  }]
+}
