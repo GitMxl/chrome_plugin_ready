@@ -1,5 +1,5 @@
 (() => {
-  const keys = ["enabled", "siteMode", "sites", "strength", "layout"];
+  const keys = ["enabled", "siteMode", "sites", "strength", "layout", "siteStrengths"];
   const maxSites = 500;
 
   function normalizeSite(value) {
@@ -34,7 +34,13 @@
         if (!sites.includes(host) && sites.length < maxSites) sites.push(host);
       } catch { /* Ignore corrupt stored entries instead of disabling all rules. */ }
     }
-    return { enabled: value.enabled !== false, siteMode: value.siteMode === "only" ? "only" : "exclude", sites,
+    const siteStrengths = Object.create(null);
+    for (const [site, strength] of Object.entries(value.siteStrengths && typeof value.siteStrengths === "object" ? value.siteStrengths : {}).slice(0, maxSites)) {
+      try {
+        if (["basic", "strict"].includes(strength)) siteStrengths[normalizeSite(site)] = strength;
+      } catch { /* Ignore invalid stored overrides. */ }
+    }
+    return { enabled: value.enabled !== false, siteMode: value.siteMode === "only" ? "only" : "exclude", sites, siteStrengths,
       strength: value.strength === "basic" ? "basic" : "strict",
       layout: value.layout === "collapse" ? "collapse" : "preserve" };
   }
@@ -59,14 +65,41 @@
 
   function rules(settings) {
     // Network image requests do not distinguish inline content from CSS icons.
-    if (!settings.enabled || settings.strength === "basic" || (settings.siteMode === "only" && !settings.sites.length)) return [];
+    if (!settings.enabled || (settings.siteMode === "only" && !settings.sites.length)) return [];
+    const overrides = Object.entries(settings.siteStrengths || {});
+    const result = [];
     const condition = { urlFilter: "*", resourceTypes: ["image"] };
     if (settings.sites.length) {
       // Match the top-level website, not the image CDN or an embedded frame.
       condition[settings.siteMode === "only" ? "topDomains" : "excludedTopDomains"] = settings.sites;
     }
-    return [{ id: 1, priority: 1, action: { type: "block" }, condition }];
+    if (settings.strength === "strict") {
+      condition.excludedTopDomains = [...new Set([...(condition.excludedTopDomains || []), ...overrides.map(([site]) => site)])];
+      if (!condition.excludedTopDomains.length) delete condition.excludedTopDomains;
+      result.push({ id: 1, priority: 1, action: { type: "block" }, condition });
+    }
+    overrides.forEach(([site, strength], index) => {
+      if (strength !== "strict") return;
+      let domains = [site];
+      if (settings.siteMode === "only") domains = settings.sites.flatMap(listed =>
+        matches(site, [listed]) ? [site] : matches(listed, [site]) ? [listed] : []);
+      if (!domains.length) return;
+      const excluded = [...new Set([
+        ...(settings.siteMode === "exclude" ? settings.sites : []),
+        ...overrides.filter(([child]) => child !== site && matches(child, [site])).map(([child]) => child)
+      ])];
+      const condition = { urlFilter: "*", resourceTypes: ["image"], topDomains: [...new Set(domains)] };
+      if (excluded.length) condition.excludedTopDomains = excluded;
+      result.push({ id: index + 2, priority: 1, action: { type: "block" }, condition });
+    });
+    return result;
   }
 
-  globalThis.ImageFilterSettings = Object.freeze({ keys, normalizeSite, parseSites, normalize, hostname, matches, shouldBlock, rules });
+  function strengthFor(settings, host) {
+    const site = Object.keys(settings.siteStrengths || {}).filter(site => matches(host, [site]))
+      .sort((a, b) => b.length - a.length)[0];
+    return site ? settings.siteStrengths[site] : settings.strength;
+  }
+
+  globalThis.ImageFilterSettings = Object.freeze({ keys, normalizeSite, parseSites, normalize, hostname, matches, shouldBlock, rules, strengthFor });
 })();

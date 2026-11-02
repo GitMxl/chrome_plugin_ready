@@ -103,7 +103,7 @@ try {
   await until(() => evaluate(workerSession, 'typeof synchronize === "function"'), 'background startup');
   async function settings(value) {
     return evaluate(workerSession, `(async () => {
-      await chrome.storage.local.set(${JSON.stringify({ strength: 'strict', layout: 'preserve', ...value })});
+      await chrome.storage.local.set(${JSON.stringify({ strength: 'strict', layout: 'preserve', siteStrengths: {}, ...value })});
       await synchronize();
       return chrome.declarativeNetRequest.getDynamicRules();
     })()`);
@@ -146,6 +146,14 @@ try {
   assert.deepEqual(excludeRules[0].condition.excludedTopDomains, ['blocked.test']);
   await checkPage('blocked.test', false);
   await checkPage('allowed.test', true);
+  await settings({ enabled: true, siteMode: 'exclude', sites: [], siteStrengths: { 'blocked.test': 'basic', 'deep.blocked.test': 'strict' } });
+  await checkPage('blocked.test', true, false);
+  await checkPage('sub.blocked.test', true, false);
+  await checkPage('deep.blocked.test', true, true);
+  await settings({ enabled: true, strength: 'basic', siteMode: 'only', sites: ['blocked.test'], siteStrengths: { 'blocked.test': 'strict' } });
+  await checkPage('blocked.test', true, true);
+  await checkPage('allowed.test', false);
+  await settings({ enabled: true, siteMode: 'exclude', sites: [] });
   await settings({ enabled: false, siteMode: 'only', sites: ['blocked.test'] });
   await checkPage('blocked.test', false);
   await settings({ enabled: true, siteMode: 'only', sites: [] });
@@ -159,6 +167,16 @@ try {
   await send('DOM.enable', {}, revealSession);
   const changeLayout = (layout, strength = 'strict', enabled = true) => settings({ enabled, siteMode: 'exclude', sites: [], layout, strength });
   await changeLayout('collapse');
+  await evaluate(revealSession, `document.getElementById('network').alt = '山间的湖泊';`);
+  await until(async () => {
+    const { root } = await send('DOM.getDocument', { depth: -1, pierce: true }, revealSession);
+    return JSON.stringify(root).includes('显示图片：山间的湖泊');
+  }, 'alt description appears in actual reveal control');
+  await evaluate(revealSession, `document.getElementById('network').alt = '<b>更新描述</b>';`);
+  await until(async () => {
+    const { root } = await send('DOM.getDocument', { depth: -1, pierce: true }, revealSession);
+    return JSON.stringify(root).includes('显示图片：<b>更新描述</b>');
+  }, 'dynamic alt updates as plain text');
   await until(() => evaluate(revealSession, `document.getElementById('network').getBoundingClientRect().height === 0 && document.querySelectorAll('[data-image-filter-anchor]').length === 2`), 'collapse removes image space and retains compact controls');
   assert.equal(await evaluate(revealSession, `document.getElementById('image-button').getBoundingClientRect().height`), 0, 'strict collapse also removes image buttons');
   await changeLayout('preserve');

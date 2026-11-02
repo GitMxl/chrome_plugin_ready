@@ -11,6 +11,19 @@ function context(globals = {}) {
   return ctx;
 }
 const Settings = context().ImageFilterSettings;
+// Network partitions must agree with the inherited content policy.
+for (const strength of ['basic', 'strict']) {
+  for (const siteMode of ['only', 'exclude']) {
+    const policy = Settings.normalize({ strength, siteMode, sites: ['example.com', 'skip.deep.example.com'],
+      siteStrengths: { 'example.com': 'basic', 'deep.example.com': 'strict', 'leaf.deep.example.com': 'basic', 'back.leaf.deep.example.com': 'strict' } });
+    for (const host of ['other.test', 'example.com', 'a.example.com', 'deep.example.com', 'skip.deep.example.com', 'leaf.deep.example.com', 'back.leaf.deep.example.com']) {
+      const blocked = Settings.rules(policy).some(({ condition }) =>
+        (!condition.topDomains || Settings.matches(host, condition.topDomains)) &&
+        !Settings.matches(host, condition.excludedTopDomains || []));
+      assert.equal(blocked, Settings.shouldBlock(policy, host) && Settings.strengthFor(policy, host) === 'strict', `${siteMode}/${strength}/${host}`);
+    }
+  }
+}
 const manifest = JSON.parse(read('manifest.json'));
 assert.equal(manifest.minimum_chrome_version, '145');
 assert.deepEqual(manifest.permissions, ['storage', 'declarativeNetRequest', 'activeTab']);
@@ -19,8 +32,8 @@ for (const file of [manifest.background.service_worker, manifest.action.default_
   assert.ok(fs.existsSync(new URL(`../${file}`, import.meta.url)), `Missing ${file}`);
 }
 
-assert.deepEqual(plain(Settings.normalize()), { enabled: true, siteMode: 'exclude', sites: [], strength: 'strict', layout: 'preserve' });
-assert.deepEqual(plain(Settings.normalize({ enabled: false })), { enabled: false, siteMode: 'exclude', sites: [], strength: 'strict', layout: 'preserve' });
+assert.deepEqual(plain(Settings.normalize()), { enabled: true, siteMode: 'exclude', sites: [], siteStrengths: {}, strength: 'strict', layout: 'preserve' });
+assert.deepEqual(plain(Settings.normalize({ enabled: false })), { enabled: false, siteMode: 'exclude', sites: [], siteStrengths: {}, strength: 'strict', layout: 'preserve' });
 assert.equal(Settings.normalize({ layout: 'invalid' }).layout, 'preserve');
 assert.equal(Settings.normalize({ layout: 'collapse' }).layout, 'collapse');
 assert.equal(Settings.normalize({ strength: 'invalid' }).strength, 'strict');
@@ -85,7 +98,7 @@ async function background(initial = {}) {
       },
       updateDynamicRules: async update => {
       if (fail) { fail = false; throw new Error('test failure'); }
-      assert.deepEqual(Array.from(update.removeRuleIds), [1]);
+      assert.deepEqual(Array.from(update.removeRuleIds), Array.from({ length: 501 }, (_, i) => i + 1));
       rules = plain(update.addRules);
     } },
     action: {
@@ -104,6 +117,10 @@ async function background(initial = {}) {
   return { listeners, message, save, get sessionRules() { return sessionRules; }, get rules() { return rules; }, get stored() { return stored; }, get badge() { return badge; }, failNext() { fail = true; } };
 }
 const bg = await background();
+const perSite = await background({ strength: 'basic', siteStrengths: { 'example.com': 'strict' } });
+assert.equal((await perSite.message({ type: 'getImagePolicy' }, { tab: { url: 'https://sub.example.com' }, url: 'https://frame.test' })).strength, 'strict');
+assert.equal((await perSite.message({ type: 'getImagePolicy' }, { frameId: 0, url: 'https://other.test' })).strength, 'basic');
+assert.equal((await background(perSite.stored)).rules.length, 1);
 assert.equal(bg.rules.length, 1);
 assert.equal(bg.badge, 'ON');
 const only = { enabled: true, siteMode: 'only', sites: ['example.com'] };
@@ -283,6 +300,15 @@ const ui = await popup();
 const el = id => ui.elements.get(id);
 assert.equal(el('strength').value, 'strict');
 assert.equal(el('layout').value, 'preserve');
+el('site-strength').value = 'basic';
+await el('site-strength').handlers.change();
+assert.deepEqual(ui.saves.at(-1).siteStrengths, { 'www.example.com': 'basic' });
+el('layout').value = 'collapse';
+await el('layout').handlers.change();
+assert.deepEqual(ui.saves.at(-1).siteStrengths, { 'www.example.com': 'basic' });
+el('site-strength').value = 'inherit';
+await el('site-strength').handlers.change();
+assert.deepEqual(ui.saves.at(-1).siteStrengths, {});
 el('layout').value = 'collapse';
 await el('layout').handlers.change();
 assert.equal(ui.saves.at(-1).layout, 'collapse');

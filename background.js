@@ -33,7 +33,7 @@ function synchronize() {
   pending = pending.catch(() => {}).then(async () => {
     const settings = Settings.normalize(await chrome.storage.local.get(Settings.keys));
     await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [IMAGE_RULE_ID],
+      removeRuleIds: Array.from({ length: 501 }, (_, index) => IMAGE_RULE_ID + index),
       addRules: Settings.rules(settings)
     });
     await chrome.action.setBadgeText({ text: settings.enabled ? "ON" : "OFF" });
@@ -58,7 +58,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       // the top-level site's policy.
       const url = sender.frameId === 0 ? sender.url : sender.tab?.url || sender.url;
       const host = Settings.hostname(url || "");
-      respond({ enabled: !rules.some(rule => rule.priority === 3) && Settings.shouldBlock(settings, host), strength: settings.strength, layout: settings.layout });
+      respond({ enabled: !rules.some(rule => rule.priority === 3) && Settings.shouldBlock(settings, host), strength: Settings.strengthFor(settings, host), layout: settings.layout });
     }).catch(() => respond({ error: "无法读取网站设置" }));
     return true;
   }
@@ -86,7 +86,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === "revealImage" && Number.isInteger(sender.tab?.id)) {
     sessionChange(async () => {
       const settings = Settings.normalize(await chrome.storage.local.get(Settings.keys));
-      if (settings.strength === "basic") return;
+      const host = Settings.hostname(sender.frameId === 0 ? sender.url : sender.tab?.url || sender.url);
+      if (Settings.strengthFor(settings, host) === "basic") return;
       const url = new URL(message.url);
       if (["data:", "blob:"].includes(url.protocol)) return;
       if (!["http:", "https:"].includes(url.protocol)) throw new Error("不支持此图片地址");

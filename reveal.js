@@ -116,6 +116,13 @@
       }
     }
     for (const [image, button] of buttons) {
+      const description = (image.alt || "").trim().replace(/\s+/g, " ");
+      if (!button.disabled) {
+        const label = description ? `显示图片：${description}` : "显示图片";
+        if (button.textContent !== label) button.textContent = label;
+        button.title = description ? `显示图片：${description}` : "仅显示这张图片";
+        button.setAttribute("aria-label", button.title);
+      }
       let target = image;
       if (layout === "collapse") {
         let anchor = anchors.get(image);
@@ -128,6 +135,10 @@
           resize.observe(anchor);
         }
         if (anchor.parentNode !== image.parentNode || anchor.nextSibling !== image) image.before(anchor);
+        const width = description ? "220px" : "76px";
+        const height = description ? "48px" : "24px";
+        if (anchor.style.width !== width) anchor.style.setProperty("width", width, "important");
+        if (anchor.style.height !== height) anchor.style.setProperty("height", height, "important");
         target = anchor;
       } else {
         removeAnchor(image);
@@ -138,8 +149,8 @@
       if (visible) {
         button.style.left = `${Math.max(0, rect.left)}px`;
         button.style.top = `${Math.max(0, rect.top)}px`;
-        button.style.width = `${Math.max(32, Math.min(rect.width || 72, 120))}px`;
-        button.style.height = `${Math.max(24, Math.min(rect.height || 28, 36))}px`;
+        button.style.width = `${Math.max(32, Math.min(rect.width || 72, description ? 240 : 120))}px`;
+        button.style.height = `${Math.max(24, Math.min(rect.height || 28, description ? 64 : 36))}px`;
       }
     }
   }
@@ -148,7 +159,7 @@
   globalThis.ImageRevealControls = {
     watch(root) {
       roots.add(root);
-      observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcset", "class", "style", "hidden"] });
+      observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcset", "alt", "class", "style", "hidden"] });
       schedule();
     },
     setEnabled(value, nextLayout) { enabled = value; layout = nextLayout; schedule(); }

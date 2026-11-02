@@ -10,7 +10,7 @@
   <h1>全部图片屏蔽</h1>
   <label class="toggle"><span>启用图片屏蔽</span><input id="enabled" type="checkbox" role="switch" disabled></label>
   <p id="status" role="status">正在读取设置…</p>
-  <label class="field" for="strength">屏蔽强度</label>
+  <label class="field" for="strength">默认屏蔽强度</label>
   <select id="strength" disabled>
     <option value="basic">仅屏蔽普通图片</option>
     <option value="strict">严格模式（拦截下载及装饰图片）</option>
@@ -30,6 +30,13 @@
   <div class="current-site">
     <p id="current-site">正在读取当前网站…</p>
     <p id="site-status" class="hint"></p>
+    <label class="field" for="site-strength">当前网站屏蔽强度</label>
+    <select id="site-strength" disabled>
+      <option value="inherit">跟随默认或上级域名</option>
+      <option value="basic">仅屏蔽普通图片</option>
+      <option value="strict">严格模式</option>
+    </select>
+    <p class="hint">自动保存并包含子域名，更具体的域名优先。选择跟随可移除本站设置；白名单和临时放行仍优先。切换后请刷新网页。</p>
     <button id="temporary-tab" class="secondary" type="button" disabled>临时放行当前标签页</button>
     <p class="hint">仅当前标签页有效，关闭标签页后失效。点击后自动刷新网页。</p>
     <button id="add-current" class="secondary" type="button" disabled>添加当前网站到列表</button>
