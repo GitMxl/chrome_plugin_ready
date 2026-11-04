@@ -2,6 +2,8 @@
   const roots = new Set();
   const buttons = new Map();
   const anchors = new Map();
+  const errors = new WeakMap();
+  let discoveryNeeded = true;
   let enabled = false;
   let layout = "preserve";
   let scheduled = false;
@@ -14,7 +16,10 @@
     requestAnimationFrame(update);
   }
   const resize = new ResizeObserver(schedule);
-  const observer = new MutationObserver(schedule);
+  const observer = new MutationObserver(records => {
+    if (records.some(record => record.type === "childList" || record.attributeName === "data-image-filter-revealed")) discoveryNeeded = true;
+    schedule();
+  });
 
   function removeAnchor(image) {
     const anchor = anchors.get(image);
@@ -39,12 +44,20 @@
   }
 
   async function reveal(image, button) {
+    errors.delete(image);
     button.disabled = true;
     button.textContent = "加载中…";
     try {
       const url = image.currentSrc || image.src;
       if (!url) throw new Error("图片尚无地址，请稍后重试");
       const result = await chrome.runtime.sendMessage({ type: "revealImage", url });
+      // The page or policy may have changed while the worker was responding.
+      if (!enabled || !image.isConnected || buttons.get(image) !== button) return;
+      if ((image.currentSrc || image.src) !== url) {
+        button.disabled = false;
+        schedule();
+        return;
+      }
       if (!result?.ok) throw new Error(result?.error || "无法显示图片，请重试");
       // Freeze the selected responsive candidate so only the approved URL loads.
       const picture = image.parentElement?.tagName === "PICTURE" ? image.parentElement : null;
@@ -67,21 +80,23 @@
       };
       const failed = () => {
         restore();
+        errors.set(image, { url, message: "图片加载失败，点击重试；也可临时放行当前标签页" });
         image.removeAttribute("data-image-filter-revealed");
         image.style.removeProperty("visibility");
         for (const [element, value] of attributes) {
           if (value !== null) element.setAttribute("srcset", value);
         }
+        discoveryNeeded = true;
         schedule();
       };
       image.addEventListener("load", restore, { once: true });
       image.addEventListener("error", failed, { once: true });
       image.src = url;
     } catch (error) {
+      if (buttons.get(image) !== button) return;
+      errors.set(image, { url: image.currentSrc || image.src, message: error.message });
       button.disabled = false;
-      button.textContent = "重试";
-      button.title = error.message;
-      button.setAttribute("aria-label", error.message + "，点击重试");
+      schedule();
     }
   }
 
@@ -99,28 +114,36 @@
     createPanel();
     if (!panel) return;
     if (!host.isConnected) document.documentElement.appendChild(host);
-    for (const root of roots) {
-      if (root !== document && !root.host.isConnected) { roots.delete(root); continue; }
-      for (const image of root.querySelectorAll("img:not([data-image-filter-revealed])")) {
-        if (!buttons.has(image)) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.textContent = "显示图片";
-          button.title = image.alt ? `显示图片：${image.alt}` : "仅显示这张图片";
-          button.setAttribute("aria-label", button.title);
-          button.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); reveal(image, button); });
-          panel.appendChild(button);
-          buttons.set(image, button);
-          resize.observe(image);
+    if (discoveryNeeded) {
+      discoveryNeeded = false;
+      for (const root of roots) {
+        if (root !== document && !root.host.isConnected) { roots.delete(root); continue; }
+        for (const image of root.querySelectorAll("img:not([data-image-filter-revealed])")) {
+          if (!buttons.has(image)) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = "显示图片";
+            button.title = image.alt ? `显示图片：${image.alt}` : "仅显示这张图片";
+            button.setAttribute("aria-label", button.title);
+            button.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); reveal(image, button); });
+            panel.appendChild(button);
+            buttons.set(image, button);
+            resize.observe(image);
+          }
         }
       }
     }
     for (const [image, button] of buttons) {
       const description = (image.alt || "").trim().replace(/\s+/g, " ");
+      let error = errors.get(image);
+      if (error && error.url !== (image.currentSrc || image.src)) {
+        errors.delete(image);
+        error = null;
+      }
       if (!button.disabled) {
-        const label = description ? `显示图片：${description}` : "显示图片";
+        const label = error ? "加载失败，点击重试" : description ? `显示图片：${description}` : "显示图片";
         if (button.textContent !== label) button.textContent = label;
-        button.title = description ? `显示图片：${description}` : "仅显示这张图片";
+        button.title = error ? error.message : description ? `显示图片：${description}` : "仅显示这张图片";
         button.setAttribute("aria-label", button.title);
       }
       let target = image;
@@ -159,9 +182,10 @@
   globalThis.ImageRevealControls = {
     watch(root) {
       roots.add(root);
-      observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcset", "alt", "class", "style", "hidden"] });
+      discoveryNeeded = true;
+      observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcset", "alt", "class", "style", "hidden", "data-image-filter-revealed"] });
       schedule();
     },
-    setEnabled(value, nextLayout) { enabled = value; layout = nextLayout; schedule(); }
+    setEnabled(value, nextLayout) { enabled = value; layout = nextLayout; discoveryNeeded = true; schedule(); }
   };
 })();

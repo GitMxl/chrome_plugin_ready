@@ -70,11 +70,22 @@ async function background(initial = {}) {
   let stored = { ...initial };
   let rules = [];
   let badge;
+  const tabBadges = new Map();
   let sessionRules = [];
   let fail = false;
+  let pageOverride;
   const chrome = {
     tabs: {
       get: async id => ({ id, url: 'https://example.com/' }),
+      query: async () => [{ id: 7 }],
+      sendMessage: async id => {
+        if (pageOverride === null) throw new Error('no content script');
+        if (pageOverride) return pageOverride;
+        const policy = Settings.diagnose(Settings.normalize(stored), 'example.com', sessionRules.some(r => r.priority === 3 && r.condition.tabIds?.includes(id)));
+        return { url: 'https://example.com/', enabled: policy.blocked, strength: policy.strength, layout: Settings.normalize(stored).layout, ready: true };
+      },
+      onActivated: { addListener: fn => { listeners.activate = fn; } },
+      onUpdated: { addListener: fn => { listeners.update = fn; } },
       onRemoved: { addListener: fn => { listeners.removed = fn; } }
     },
     runtime: {
@@ -92,6 +103,7 @@ async function background(initial = {}) {
     },
     declarativeNetRequest: {
       getSessionRules: async () => plain(sessionRules),
+      getDynamicRules: async () => plain(rules),
       isRegexSupported: async () => ({ isSupported: true }),
       updateSessionRules: async ({ removeRuleIds = [], addRules = [] }) => {
         sessionRules = [...sessionRules.filter(rule => !removeRuleIds.includes(rule.id)), ...plain(addRules)];
@@ -102,7 +114,8 @@ async function background(initial = {}) {
       rules = plain(update.addRules);
     } },
     action: {
-      setBadgeText: async ({ text }) => { badge = text; },
+      setBadgeText: async ({ text, tabId }) => { if (tabId === undefined) badge = text; else tabBadges.set(tabId, text); },
+      setTitle: async () => {},
       setBadgeBackgroundColor: async () => {}
     }
   };
@@ -114,9 +127,33 @@ async function background(initial = {}) {
     assert.equal(listeners.message(value, sender, resolve), true);
   });
   const save = settings => message({ type: 'saveImageSettings', settings });
-  return { listeners, message, save, get sessionRules() { return sessionRules; }, get rules() { return rules; }, get stored() { return stored; }, get badge() { return badge; }, failNext() { fail = true; } };
+  return { listeners, message, save, tabBadges, dropRules() { rules = []; }, setPage(value) { pageOverride = value; }, get sessionRules() { return sessionRules; }, get rules() { return rules; }, get stored() { return stored; }, get badge() { return badge; }, failNext() { fail = true; } };
 }
 const bg = await background();
+assert.equal(bg.tabBadges.get(7), 'ON');
+const diagnosis = await bg.message({ type: 'getImageDiagnostics', tabId: 7 });
+assert.equal(diagnosis.networkApplied, true);
+assert.equal(diagnosis.pageApplied, true);
+assert.equal(diagnosis.policy.code, 'ON');
+const mismatch = await background();
+mismatch.dropRules();
+assert.equal((await mismatch.message({ type: 'getImageDiagnostics', tabId: 7 })).networkApplied, false);
+mismatch.setPage({ url: 'https://example.com/', enabled: false, strength: 'strict', layout: 'preserve', ready: true });
+assert.equal((await mismatch.message({ type: 'getImageDiagnostics', tabId: 7 })).pageApplied, false);
+mismatch.setPage(null);
+mismatch.listeners.activate({ tabId: 7 });
+await flush();
+assert.equal(mismatch.tabBadges.get(7), '—', 'unconnected pages do not claim to be blocked');
+assert.equal((await mismatch.message({ type: 'getImageDiagnostics', tabId: 7 })).pageConnected, false);
+mismatch.setPage(undefined);
+mismatch.listeners.update(7, { status: 'complete' });
+await flush();
+assert.equal(mismatch.tabBadges.get(7), 'ON', 'navigation completion refreshes the badge');
+assert.equal(Settings.diagnose(Settings.normalize({ sites: ['example.com'] }), 'news.example.com').matchedSite, 'example.com');
+assert.equal(Settings.diagnose(Settings.normalize({ sites: ['news.example.com'] }), 'other.example.com').code, 'ON');
+assert.equal(Settings.diagnose(Settings.normalize({ sites: ['news.example.com'] }), 'news.example.com').code, 'PASS');
+assert.equal(Settings.diagnose(Settings.normalize({ strength: 'basic' }), 'example.com').code, 'IMG');
+assert.equal(Settings.diagnose(Settings.normalize(), '').code, 'NA');
 const perSite = await background({ strength: 'basic', siteStrengths: { 'example.com': 'strict' } });
 assert.equal((await perSite.message({ type: 'getImagePolicy' }, { tab: { url: 'https://sub.example.com' }, url: 'https://frame.test' })).strength, 'strict');
 assert.equal((await perSite.message({ type: 'getImagePolicy' }, { frameId: 0, url: 'https://other.test' })).strength, 'basic');
@@ -130,6 +167,7 @@ assert.deepEqual(bg.rules[0].condition.topDomains, ['example.com']);
 assert.equal((await bg.message({ type: 'getImagePolicy' }, { tab: { url: 'https://example.com/page' }, url: 'https://frame.other.test/' })).enabled, true);
 assert.equal((await bg.message({ type: 'getImagePolicy' }, { tab: { url: 'https://other.test/' }, url: 'https://example.com/frame' })).enabled, false);
 await bg.save({ ...only, siteMode: 'exclude' });
+assert.equal(bg.tabBadges.get(7), 'PASS');
 assert.deepEqual(bg.rules[0].condition.excludedTopDomains, ['example.com']);
 assert.equal((await bg.message({ type: 'getImagePolicy' }, { tab: { url: 'https://example.com/' } })).enabled, false);
 // First navigation may still expose about:blank or the previous URL in tab.url.
@@ -175,6 +213,8 @@ assert.equal(bg.sessionRules.length, 0, 'basic reveal needs no network exception
 await bg.save({ enabled: true, sites: [], siteMode: 'exclude' });
 const tabSender = { frameId: 0, tab: { id: 7, url: 'https://example.com/' }, url: 'https://example.com/' };
 assert.equal((await bg.message({ type: 'setTemporaryTabState', tabId: 7, allowed: true })).allowed, true);
+assert.equal(bg.tabBadges.get(7), 'TEMP');
+assert.equal((await bg.message({ type: 'getImageDiagnostics', tabId: 7 })).policy.reason, '当前标签页已临时放行');
 assert.equal((await bg.message({ type: 'getImagePolicy' }, tabSender)).enabled, false);
 assert.equal((await bg.message({ type: 'getImagePolicy' }, { ...tabSender, tab: { ...tabSender.tab, id: 8 } })).enabled, true);
 assert.equal((await bg.message({ type: 'getTemporaryTabState', tabId: 7 })).allowed, true);
@@ -217,7 +257,7 @@ async function content() {
       observe() {}
     },
     chrome: {
-      runtime: { sendMessage: () => new Promise(resolve => replies.push(resolve)) },
+      runtime: { sendMessage: () => new Promise(resolve => replies.push(resolve)), onMessage: { addListener() {} } },
       storage: { onChanged: { addListener: fn => { change = fn; } } }
     }
   });
@@ -269,7 +309,11 @@ await content();
 async function popup(url = 'https://www.example.com/page') {
   const elements = new Map();
   const saves = [];
+  const events = [];
   let stored = {};
+  let temporary = false;
+  let saveError = false;
+  let reloadError = false;
   let reloaded;
   const ctx = context({
     document: { getElementById(id) {
@@ -282,10 +326,13 @@ async function popup(url = 'https://www.example.com/page') {
     window: { close() {} },
     chrome: {
       storage: { local: { get: async () => stored } },
-      tabs: { query: async () => [{ id: 7, url }], reload: async id => { reloaded = id; } },
+      tabs: { query: async () => [{ id: 7, url }], reload: async id => { events.push('reload'); if (reloadError) throw new Error('reload failed'); reloaded = id; } },
       runtime: { sendMessage: async message => {
+        if (message.type === 'getImageDiagnostics') return { ok: true, policy: plain(Settings.diagnose(Settings.normalize(stored), Settings.hostname(url), temporary)), temporaryAllowed: temporary, pageApplied: true, pageConnected: true, networkApplied: true, imageExceptions: 0 };
         if (message.type === 'getTemporaryTabState') return { ok: true, allowed: false };
-        if (message.type === 'setTemporaryTabState') return { ok: true, allowed: message.allowed };
+        if (message.type === 'setTemporaryTabState') { temporary = message.allowed; return { ok: true, allowed: message.allowed }; }
+        events.push('save');
+        if (saveError) return { error: '测试保存失败' };
         saves.push(plain(message.settings));
         stored = plain(message.settings);
         return { ok: true, settings: stored };
@@ -294,7 +341,7 @@ async function popup(url = 'https://www.example.com/page') {
   });
   vm.runInContext(read('popup.js'), ctx);
   await flush();
-  return { elements, saves, get reloaded() { return reloaded; } };
+  return { elements, saves, events, failSave() { saveError = true; }, failReload() { reloadError = true; }, get reloaded() { return reloaded; } };
 }
 const ui = await popup();
 const el = id => ui.elements.get(id);
@@ -346,4 +393,19 @@ await el('temporary-tab').handlers.click();
 assert.equal(el('temporary-tab').textContent, '临时放行当前标签页');
 const internal = await popup('chrome://extensions');
 assert.equal(internal.elements.get('add-current').disabled, true);
+assert.equal(internal.elements.get('save-reload').disabled, true);
+const combined = await popup();
+combined.elements.get('sites').value = 'example.com';
+await combined.elements.get('save-reload').handlers.click();
+assert.deepEqual(combined.events, ['save', 'reload']);
+assert.match(combined.elements.get('diagnostic-match').textContent, /example.com/);
+assert.equal(combined.reloaded, 7);
+const failedSave = await popup();
+failedSave.failSave();
+await failedSave.elements.get('save-reload').handlers.click();
+assert.deepEqual(failedSave.events, ['save'], 'never refresh after failed save');
+const failedReload = await popup();
+failedReload.failReload();
+await failedReload.elements.get('save-reload').handlers.click();
+assert.match(failedReload.elements.get('status').textContent, /已保存，但刷新失败/);
 console.log('PASS: domain validation, modes, subdomains, top-level/CDN/iframe policies, persistence, rapid changes, stale replies, style restoration and popup actions.');

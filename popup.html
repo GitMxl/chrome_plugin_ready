@@ -7,47 +7,89 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <h1>全部图片屏蔽</h1>
-  <label class="toggle"><span>启用图片屏蔽</span><input id="enabled" type="checkbox" role="switch" disabled></label>
-  <p id="status" role="status">正在读取设置…</p>
-  <label class="field" for="strength">默认屏蔽强度</label>
-  <select id="strength" disabled>
-    <option value="basic">仅屏蔽普通图片</option>
-    <option value="strict">严格模式（拦截下载及装饰图片）</option>
-  </select>
-  <p class="hint">普通模式保留背景图、图片按钮和装饰图标，图片仍会下载。严格模式同时隐藏这些图片，可能影响部分网站操作。切换后请刷新网页。</p>
-  <label class="field" for="layout">图片布局</label>
-  <select id="layout" disabled>
-    <option value="preserve">保留布局</option>
-    <option value="collapse">折叠空白</option>
-  </select>
-  <p class="hint">保留布局维持图片原有空间；折叠空白将普通图片收起为小型查看按钮。网站容器自身的固定高度和留白可能保留。</p>
-  <label class="field" for="site-mode">过滤范围</label>
-  <select id="site-mode" disabled>
-    <option value="exclude">屏蔽所有网站，列表中的除外</option>
-    <option value="only">仅屏蔽列表中的网站</option>
-  </select>
-  <div class="current-site">
+  <header class="app-header">
+    <div class="app-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h14a2 2 0 0 1 2 2v12M20 20H6a2 2 0 0 1-2-2V8M3 3l18 18M4 17l5-5 4 4 2-2"/><circle cx="15.5" cy="8.5" r="1.5"/></svg>
+    </div>
+    <div class="app-title"><h1>图片屏蔽</h1><p>少些图片，专注内容</p></div>
+    <label class="toggle" title="启用或暂停图片屏蔽">
+      <input id="enabled" type="checkbox" role="switch" aria-label="启用图片屏蔽" disabled>
+      <span class="switch-track" aria-hidden="true"></span>
+    </label>
+  </header>
+  <main>
+  <section class="card current-site" aria-labelledby="current-heading">
+    <div class="section-heading"><h2 id="current-heading">当前网站</h2><span class="eyebrow">仅在本机保存</span></div>
     <p id="current-site">正在读取当前网站…</p>
-    <p id="site-status" class="hint"></p>
-    <label class="field" for="site-strength">当前网站屏蔽强度</label>
+    <p id="site-status" class="site-status"></p>
+    <div class="inline-field">
+    <label for="site-strength">本站强度</label>
     <select id="site-strength" disabled>
       <option value="inherit">跟随默认或上级域名</option>
       <option value="basic">仅屏蔽普通图片</option>
       <option value="strict">严格模式</option>
     </select>
-    <p class="hint">自动保存并包含子域名，更具体的域名优先。选择跟随可移除本站设置；白名单和临时放行仍优先。切换后请刷新网页。</p>
+    </div>
+    <p class="hint">自动保存，包含子域名；网站例外和临时放行优先。</p>
     <button id="temporary-tab" class="secondary" type="button" disabled>临时放行当前标签页</button>
-    <p class="hint">仅当前标签页有效，关闭标签页后失效。点击后自动刷新网页。</p>
-    <button id="add-current" class="secondary" type="button" disabled>添加当前网站到列表</button>
-  </div>
-  <label class="field" id="sites-label" for="sites">不屏蔽的网站</label>
-  <textarea id="sites" rows="4" placeholder="example.com&#10;news.example.org" spellcheck="false" disabled></textarea>
-  <p class="hint">每行一个域名或网址，自动包含子域名。删除对应行并保存即可移除规则。</p>
-  <button id="save-sites" type="button" disabled>保存网站列表</button>
-  <p class="hint">图片位置的「显示图片」按钮可单独查看图片。严格模式下背景图仍被屏蔽。关闭屏蔽后请刷新网页。</p>
-  <button id="reload" class="secondary" type="button" disabled>刷新当前网页</button>
-  <p class="hint">首次安装后，请刷新已打开的网页。浏览器内置页面及扩展商店不支持屏蔽。</p>
+    <p class="hint">自动刷新，仅本标签页有效，关闭后失效。</p>
+    <details class="diagnostics">
+      <summary><span>规则诊断</span><span class="summary-hint"><span id="diagnostic-summary">正在检查…</span><span class="chevron" aria-hidden="true">⌄</span></span></summary>
+      <p class="hint">按已保存的规则检查当前标签页。</p>
+      <dl class="diagnostic-list">
+        <dt>实际网站</dt><dd id="diagnostic-host">—</dd>
+        <dt>判断原因</dt><dd id="diagnostic-reason">—</dd>
+        <dt>命中列表</dt><dd id="diagnostic-match">—</dd>
+        <dt>强度来源</dt><dd id="diagnostic-strength">—</dd>
+        <dt>网络规则</dt><dd id="diagnostic-network">—</dd>
+        <dt>页面状态</dt><dd id="diagnostic-page">—</dd>
+        <dt>单图例外</dt><dd id="diagnostic-exceptions">—</dd>
+      </dl>
+      <p class="hint">若已放行且状态一致，图片仍不显示，请检查网站加载或其他扩展。</p>
+      <button id="refresh-diagnostic" class="secondary" type="button" disabled>重新诊断</button>
+    </details>
+  </section>
+  <section class="card" aria-labelledby="rules-heading">
+    <div class="section-heading"><h2 id="rules-heading">网站规则</h2><span class="eyebrow">包含子域名</span></div>
+    <label class="field" for="site-mode">过滤范围</label>
+    <select id="site-mode" disabled>
+      <option value="exclude">屏蔽所有网站，列表中的除外</option>
+      <option value="only">仅屏蔽列表中的网站</option>
+    </select>
+    <div class="list-heading"><label class="field" id="sites-label" for="sites">不屏蔽的网站</label><span id="sites-count" class="eyebrow">0 / 500</span></div>
+    <textarea id="sites" rows="4" placeholder="example.com&#10;news.example.org" aria-describedby="sites-hint list-state" spellcheck="false" autocapitalize="off" disabled></textarea>
+    <p class="hint" id="sites-hint">每行一个域名或网址。编辑后请保存，再刷新网页。</p>
+    <div class="list-actions">
+      <button id="add-current" class="secondary" type="button" disabled>添加当前网站到列表</button>
+      <button id="save-sites" type="button" disabled>保存网站列表</button>
+    </div>
+    <button id="save-reload" class="save-reload" type="button" disabled>保存并刷新当前网页</button>
+    <p id="list-state" class="list-state" role="status">列表已保存</p>
+  </section>
+  <details class="card defaults">
+    <summary><span>默认设置</span><span class="summary-hint">强度与布局 <span class="chevron" aria-hidden="true">⌄</span></span></summary>
+    <div class="defaults-content">
+      <label class="field" for="strength">默认屏蔽强度</label>
+      <select id="strength" aria-describedby="strength-hint" disabled>
+        <option value="basic">仅屏蔽普通图片</option>
+        <option value="strict">严格模式</option>
+      </select>
+      <p class="hint" id="strength-hint">普通模式保留背景和图标，图片仍会下载。严格模式同时拦截下载及装饰图片，可能影响网站操作。</p>
+      <label class="field" for="layout">图片布局</label>
+      <select id="layout" aria-describedby="layout-hint" disabled>
+        <option value="preserve">保留布局</option>
+        <option value="collapse">折叠空白</option>
+      </select>
+      <p class="hint" id="layout-hint">折叠后以小型查看按钮代替图片，网站容器的留白可能保留。</p>
+      <p class="settings-note">以上选项自动保存，刷新网页后完整生效。</p>
+    </div>
+  </details>
+  <p class="page-note">图片旁的「显示图片」可单独查看。浏览器内置页面及扩展商店不支持屏蔽。</p>
+  </main>
+  <footer class="app-footer">
+    <p id="status" class="notice" role="status" aria-live="polite">正在读取设置…</p>
+    <button id="reload" class="secondary" type="button" disabled><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg>刷新当前网页</button>
+  </footer>
   <script src="settings.js"></script>
   <script src="popup.js"></script>
 </body>

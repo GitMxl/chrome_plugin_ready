@@ -85,11 +85,20 @@
   watch(document);
   // Discard stale replies if a setting changes while a request is in flight.
   let revision = 0;
+  let policyReady = false;
+  chrome.runtime.onMessage.addListener((message, sender, respond) => {
+    if (message?.type === "getImageFilterState") {
+      respond({ url: location.href, enabled, strength, layout, ready: policyReady });
+    }
+  });
   async function refreshPolicy() {
     const current = ++revision;
     try {
       const policy = await chrome.runtime.sendMessage({ type: "getImagePolicy" });
-      if (current === revision && typeof policy?.enabled === "boolean") setEnabled(policy.enabled, policy.strength, policy.layout);
+      if (current === revision && typeof policy?.enabled === "boolean") {
+        setEnabled(policy.enabled, policy.strength, policy.layout);
+        policyReady = true;
+      }
     } catch (error) {
       console.error("无法读取图片屏蔽设置", error);
     }

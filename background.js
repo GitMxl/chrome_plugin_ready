@@ -1,6 +1,40 @@
 importScripts("settings.js");
 const Settings = ImageFilterSettings;
 const IMAGE_RULE_ID = 1;
+const badgeRevisions = new Map();
+
+async function pageState(tabId) {
+  try { return await chrome.tabs.sendMessage(tabId, { type: "getImageFilterState" }, { frameId: 0 }); }
+  catch { return null; }
+}
+
+async function refreshBadge(tabId, knownUrl) {
+  const revision = (badgeRevisions.get(tabId) || 0) + 1;
+  badgeRevisions.set(tabId, revision);
+  try {
+    const [value, rules, tab, page] = await Promise.all([
+      chrome.storage.local.get(Settings.keys), tabRules(tabId), chrome.tabs.get(tabId),
+      pageState(tabId)
+    ]);
+    const policy = Settings.diagnose(Settings.normalize(value), page ? Settings.hostname(page.url || knownUrl || tab.url) : "", rules.some(rule => rule.priority === 3));
+    if (badgeRevisions.get(tabId) !== revision) return;
+    await Promise.all([
+      chrome.action.setBadgeText({ tabId, text: policy.code === "NA" ? "—" : policy.code }),
+      chrome.action.setBadgeBackgroundColor({ tabId, color: policy.blocked ? "#087f73" : policy.code === "TEMP" ? "#a66b15" : "#64748b" }),
+      chrome.action.setTitle({ tabId, title: `图片屏蔽 · ${policy.label}\n${policy.host || "当前页面"}：${policy.reason}\n修改规则后刷新网页以完整应用` })
+    ]);
+  } catch { /* The tab may have closed or navigated while its state was read. */ }
+}
+
+async function refreshAllBadges() {
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(tabs.map(tab => refreshBadge(tab.id)));
+}
+
+chrome.tabs.onActivated.addListener(({ tabId }) => { refreshBadge(tabId); });
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if (change.status || change.url) refreshBadge(tabId);
+});
 
 // Session rules survive worker suspension, but never become permanent settings.
 let sessionPending = Promise.resolve();
@@ -21,6 +55,7 @@ async function addSessionRule(condition, priority) {
   });
 }
 chrome.tabs.onRemoved.addListener(tabId => {
+  badgeRevisions.delete(tabId);
   sessionChange(async () => {
     const rules = await tabRules(tabId);
     await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: rules.map(rule => rule.id) });
@@ -38,6 +73,7 @@ function synchronize() {
     });
     await chrome.action.setBadgeText({ text: settings.enabled ? "ON" : "OFF" });
     await chrome.action.setBadgeBackgroundColor({ color: settings.enabled ? "#2563eb" : "#64748b" });
+    await refreshAllBadges();
   });
   pending.catch(error => console.error("无法更新图片屏蔽规则", error));
   return pending;
@@ -58,8 +94,32 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       // the top-level site's policy.
       const url = sender.frameId === 0 ? sender.url : sender.tab?.url || sender.url;
       const host = Settings.hostname(url || "");
+      if (sender.frameId === 0 && Number.isInteger(sender.tab?.id)) refreshBadge(sender.tab.id, url);
       respond({ enabled: !rules.some(rule => rule.priority === 3) && Settings.shouldBlock(settings, host), strength: Settings.strengthFor(settings, host), layout: settings.layout });
     }).catch(() => respond({ error: "无法读取网站设置" }));
+    return true;
+  }
+  if (message?.type === "getImageDiagnostics" && sender.url === chrome.runtime.getURL("popup.html")) {
+    (async () => {
+      await pending.catch(() => {});
+      await sessionPending.catch(() => {});
+      const [tab, page, value, rules, dynamic] = await Promise.all([
+        chrome.tabs.get(message.tabId), pageState(message.tabId), chrome.storage.local.get(Settings.keys),
+        tabRules(message.tabId), chrome.declarativeNetRequest.getDynamicRules()
+      ]);
+      const settings = Settings.normalize(value);
+      const policy = Settings.diagnose(settings, Settings.hostname(page?.url || tab.url), rules.some(rule => rule.priority === 3));
+      // Compare the fields used by this extension, independent of API key order.
+      const signature = list => JSON.stringify(list.map(rule => [rule.id, rule.priority, rule.action.type,
+        rule.condition.urlFilter, ...["resourceTypes", "topDomains", "excludedTopDomains"].map(key => [...(rule.condition[key] || [])].sort())
+      ]).sort((a, b) => a[0] - b[0]));
+      const networkApplied = signature(dynamic) === signature(Settings.rules(settings));
+      const pageApplied = !!page?.ready && page.enabled === policy.blocked &&
+        page.strength === policy.strength && page.layout === settings.layout;
+      respond({ ok: true, policy, networkApplied, pageApplied, pageConnected: !!page, temporaryAllowed: rules.some(rule => rule.priority === 3),
+        imageExceptions: rules.filter(rule => rule.priority === 2).length });
+      refreshBadge(tab.id, page?.url || tab.url);
+    })().catch(() => respond({ error: "无法读取诊断，请刷新网页后重试" }));
     return true;
   }
   if (["getTemporaryTabState", "setTemporaryTabState"].includes(message?.type) &&
@@ -79,6 +139,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: rules.map(rule => rule.id) });
         }
       }
+      await refreshBadge(tab.id, tab.url);
       respond({ ok: true, allowed: (await tabRules(tab.id)).some(rule => rule.priority === 3) });
     }).catch(error => respond({ error: error.message }));
     return true;

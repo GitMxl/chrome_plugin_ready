@@ -7,8 +7,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-assert.equal(typeof WebSocket, 'function', 'Browser checks require Node.js 22+ (built-in WebSocket).');
 const executable = process.env.CHROME_PATH || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+// Edge on Windows uses the port transport; current Chrome requires the pipe to
+// install an unpacked extension through DevTools.
+const usePipe = !/^(?:msedge|microsoft-edge(?:-stable|-beta|-dev)?)(?:\.exe)?$/i.test(path.basename(executable));
+if (!usePipe) assert.equal(typeof WebSocket, 'function', 'Edge checks require Node.js 22+ (built-in WebSocket).');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'image-filter-browser-'));
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
 let port;
@@ -38,19 +41,33 @@ const server = http.createServer((request, response) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 port = server.address().port;
 const browser = spawn(executable, [
-  '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
-  `--disable-extensions-except=${root}`, `--load-extension=${root}`,
-  '--disable-features=DisableLoadExtensionCommandLineSwitch',
+  '--headless=new', `--user-data-dir=${profile}`,
+  ...(usePipe ? ['--remote-debugging-pipe', '--enable-unsafe-extension-debugging'] : [
+    '--remote-debugging-port=0', `--disable-extensions-except=${root}`, `--load-extension=${root}`,
+    '--disable-features=DisableLoadExtensionCommandLineSwitch'
+  ]),
   '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
   '--no-proxy-server', '--host-resolver-rules=MAP *.test 127.0.0.1', 'about:blank'
-], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+], { windowsHide: true, stdio: usePipe ? ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'ignore', 'pipe'] });
 let socket;
 let nextId = 0;
 const pending = new Map();
 let stderr = '';
 browser.stderr.on('data', data => { stderr = (stderr + data).slice(-6000); });
-function onMessage(event) {
-  const message = JSON.parse(event.data);
+if (usePipe) {
+  let incoming = Buffer.alloc(0);
+  browser.stdio[4].on('data', chunk => {
+    incoming = Buffer.concat([incoming, chunk]);
+    let end;
+    while ((end = incoming.indexOf(0)) !== -1) {
+      onMessage(incoming.subarray(0, end).toString('utf8'));
+      incoming = incoming.subarray(end + 1);
+    }
+  });
+  browser.stdio[3].on('error', () => {});
+}
+function onMessage(data) {
+  const message = JSON.parse(data);
   const task = pending.get(message.id);
   if (task) {
     pending.delete(message.id);
@@ -61,11 +78,13 @@ function onMessage(event) {
 }
 function send(method, params = {}, sessionId) {
   return new Promise((resolve, reject) => {
-    if (socket?.readyState !== 1) return reject(new Error('Browser connection is not open'));
+    if (usePipe ? browser.stdio[3].destroyed : socket?.readyState !== 1) return reject(new Error('Browser connection is not open'));
     const id = ++nextId;
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Timeout: ${method}\n${stderr}`)); }, 15000);
     pending.set(id, { resolve, reject, timer });
-    socket.send(JSON.stringify({ id, method, params, sessionId }));
+    const message = JSON.stringify({ id, method, params, sessionId });
+    if (usePipe) browser.stdio[3].write(message + '\0');
+    else socket.send(message);
   });
 }
 async function evaluate(session, expression) {
@@ -84,23 +103,83 @@ async function until(check, label) {
 }
 
 try {
-  const connection = await until(() => {
-    try { return fs.readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').trim().split(/\r?\n/); }
-    catch { return null; }
-  }, 'browser debugging port');
-  socket = new WebSocket(`ws://127.0.0.1:${connection[0]}${connection[1]}`);
-  socket.addEventListener('message', onMessage);
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Browser connection timed out')), 15000);
-    socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
-    socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('Browser connection failed')); }, { once: true });
-  });
+  if (usePipe) {
+    await send('Browser.getVersion');
+    await send('Extensions.loadUnpacked', { path: root });
+  } else {
+    const connection = await until(() => {
+      try { return fs.readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').trim().split(/\r?\n/); }
+      catch { return null; }
+    }, 'browser debugging port');
+    socket = new WebSocket(`ws://127.0.0.1:${connection[0]}${connection[1]}`);
+    socket.addEventListener('message', event => onMessage(event.data));
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Browser connection timed out')), 15000);
+      socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
+      socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('Browser connection failed')); }, { once: true });
+    });
+  }
   const worker = await until(async () => {
     const { targetInfos } = await send('Target.getTargets');
     return targetInfos.find(target => target.type === 'service_worker' && target.url.endsWith('/background.js'));
   }, 'extension service worker');
   const { sessionId: workerSession } = await send('Target.attachToTarget', { targetId: worker.targetId, flatten: true });
   await until(() => evaluate(workerSession, 'typeof synchronize === "function"'), 'background startup');
+  // Run the controls with a delayed worker stub to exercise races and count scans.
+  // about:blank has no extension content script, so this uses the actual DOM in isolation.
+  const { targetId: controlsId } = await send('Target.createTarget', { url: 'about:blank' });
+  const { sessionId: controlsSession } = await send('Target.attachToTarget', { targetId: controlsId, flatten: true });
+  await evaluate(controlsSession, `(() => {
+    const attach = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function(options) {
+      const result = attach.call(this, options);
+      window.testPanel = result;
+      return result;
+    };
+    window.scanCount = 0;
+    const query = document.querySelectorAll.bind(document);
+    document.querySelectorAll = selector => {
+      if (selector === 'img:not([data-image-filter-revealed])') window.scanCount++;
+      return query(selector);
+    };
+    window.replies = [];
+    Object.defineProperty(window, 'chrome', { configurable: true, value: {
+      runtime: { sendMessage: () => new Promise(resolve => window.replies.push(resolve)) }
+    }});
+    window.testImage = document.createElement('img');
+    testImage.width = 120; testImage.height = 80;
+    testImage.src = 'data:image/png;base64,${png.toString('base64')}';
+    document.body.appendChild(testImage);
+    window.afterFrames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  })()`);
+  await evaluate(controlsSession, fs.readFileSync(new URL('../reveal.js', import.meta.url), 'utf8'));
+  await evaluate(controlsSession, `ImageRevealControls.watch(document); ImageRevealControls.setEnabled(true, 'preserve'); afterFrames()`);
+  await until(() => evaluate(controlsSession, `testPanel.querySelectorAll('button').length === 1`), 'isolated controls created');
+  assert.equal(await evaluate(controlsSession, `(async () => {
+    await afterFrames(); const before = scanCount;
+    for (let i = 0; i < 5; i++) {
+      dispatchEvent(new Event('scroll')); dispatchEvent(new Event('resize')); await afterFrames();
+    }
+    return scanCount - before;
+  })()`), 0, 'scroll and resize reposition controls without rescanning the document');
+  await evaluate(controlsSession, `testPanel.querySelector('button').click(); testImage.src += '#changed'; afterFrames()`);
+  await evaluate(controlsSession, `replies.shift()({ok:true}); afterFrames()`);
+  assert.equal(await evaluate(controlsSession, `!testImage.hasAttribute('data-image-filter-revealed') && !testPanel.querySelector('button').disabled`), true, 'late approval does not overwrite a changed image source');
+  await evaluate(controlsSession, `testPanel.querySelector('button').click(); replies.shift()({error:'测试请求失败'});`);
+  await until(() => evaluate(controlsSession, `testPanel.querySelector('button')?.title === '测试请求失败'`), 'worker failure displayed');
+  await evaluate(controlsSession, `testImage.alt = '更新说明'; dispatchEvent(new Event('scroll')); afterFrames()`);
+  assert.equal(await evaluate(controlsSession, `testPanel.querySelector('button').textContent`), '加载失败，点击重试', 'updates preserve retry feedback');
+  await evaluate(controlsSession, `testPanel.querySelector('button').click(); ImageRevealControls.setEnabled(false, 'preserve'); replies.shift()({ok:true}); afterFrames()`);
+  assert.equal(await evaluate(controlsSession, `testImage.hasAttribute('data-image-filter-revealed')`), false, 'late worker reply cannot reveal after disabling');
+  await evaluate(controlsSession, `ImageRevealControls.setEnabled(true, 'preserve'); testImage.src = 'data:image/png;base64,invalid'; afterFrames()`);
+  await until(() => evaluate(controlsSession, `!testImage.complete || testImage.naturalWidth === 0`), 'broken source selected');
+  await evaluate(controlsSession, `testPanel.querySelector('button').click(); replies.shift()({ok:true});`);
+  await until(() => evaluate(controlsSession, `testPanel.querySelector('button')?.textContent === '加载失败，点击重试' && !testImage.hasAttribute('data-image-filter-revealed')`), 'load failure restores retry control');
+  await evaluate(controlsSession, `testImage.src = 'data:image/png;base64,${png.toString('base64')}'; afterFrames()`);
+  await until(() => evaluate(controlsSession, `testPanel.querySelector('button')?.textContent === '显示图片：更新说明'`), 'new source clears old error');
+  await evaluate(controlsSession, `testPanel.querySelector('button').click(); replies.shift()({ok:true});`);
+  await until(() => evaluate(controlsSession, `testImage.hasAttribute('data-image-filter-revealed') && testImage.naturalWidth === 1 && !testPanel.querySelector('button')`), 'retry succeeds');
+  await send('Target.closeTarget', { targetId: controlsId });
   async function settings(value) {
     return evaluate(workerSession, `(async () => {
       await chrome.storage.local.set(${JSON.stringify({ strength: 'strict', layout: 'preserve', siteStrengths: {}, ...value })});
@@ -146,6 +225,13 @@ try {
   assert.deepEqual(excludeRules[0].condition.excludedTopDomains, ['blocked.test']);
   await checkPage('blocked.test', false);
   await checkPage('allowed.test', true);
+  // Exact third-level exclusions must also allow CDN images and embedded frames.
+  await settings({ enabled: true, siteMode: 'exclude', sites: ['news.blocked.test'],
+    siteStrengths: { 'blocked.test': 'strict', 'news.blocked.test': 'strict' } });
+  await checkPage('news.blocked.test', false);
+  await checkPage('deep.news.blocked.test', false);
+  await checkPage('other.blocked.test', true);
+  await checkPage('blocked.test', true);
   await settings({ enabled: true, siteMode: 'exclude', sites: [], siteStrengths: { 'blocked.test': 'basic', 'deep.blocked.test': 'strict' } });
   await checkPage('blocked.test', true, false);
   await checkPage('sub.blocked.test', true, false);
@@ -231,13 +317,81 @@ try {
   await evaluate(workerSession, `sessionChange(() => addSessionRule({ tabIds: [${tabId}], resourceTypes: ['image'] }, 3))`);
   await send('Page.reload', {}, revealSession);
   await until(() => evaluate(revealSession, `document.readyState === 'complete' && document.getElementById('network')?.naturalWidth === 1 && getComputedStyle(document.getElementById('inline')).visibility === 'visible' && window.frameResult?.width === 1`), 'temporary tab allowance and frames after reload');
+  await until(() => evaluate(workerSession, `chrome.action.getBadgeText({tabId:${tabId}}).then(text => text === 'TEMP')`), 'temporary allowance toolbar badge');
   assert.equal(await evaluate(revealSession, `document.getElementById('inline').getBoundingClientRect().height`), 80, 'temporary allowance bypasses collapse');
   await checkPage('allowed.test', true);
+  assert.equal(await evaluate(workerSession, `chrome.action.getBadgeText({tabId:${tabId}})`), 'TEMP', 'other tabs do not overwrite the temporary badge');
   await send('Target.closeTarget', { targetId: revealId });
   await until(() => evaluate(workerSession, `(async () => (await tabRules(${tabId})).length === 0)()`), 'tab closure cleans exceptions');
+  // Exercise the toolbar popup itself: unlike an extension page opened in a tab,
+  // Chrome sizes this view from its initial content dimensions.
+  const { targetId: actionHostId } = await send('Target.createTarget', { url: `http://news.blocked.test:${port}/` });
+  const { sessionId: actionHostSession } = await send('Target.attachToTarget', { targetId: actionHostId, flatten: true });
+  await until(() => evaluate(actionHostSession, `document.readyState === 'complete' && document.getElementById('inline') && getComputedStyle(document.getElementById('inline')).visibility === 'hidden'`), 'toolbar test website ready');
+  const actionTabId = await evaluate(workerSession, `(async () => (await chrome.tabs.query({active:true,currentWindow:true}))[0].id)()`);
+  await until(() => evaluate(workerSession, `chrome.action.getBadgeText({tabId:${actionTabId}}).then(text => text === 'ON')`), 'strict toolbar badge');
+  const popupUrl = worker.url.replace('background.js', 'popup.html');
+  await evaluate(workerSession, 'chrome.action.openPopup()');
+  const actionPopup = await until(async () => {
+    const { targetInfos } = await send('Target.getTargets');
+    return targetInfos.find(target => target.url === popupUrl);
+  }, 'toolbar action popup');
+  const { sessionId: actionSession } = await send('Target.attachToTarget', { targetId: actionPopup.targetId, flatten: true });
+  await until(() => evaluate(actionSession, `!!document.getElementById('sites') && !document.getElementById('sites').disabled`), 'toolbar popup initialization');
+  assert.equal(await evaluate(actionSession, `document.getElementById('diagnostic-host').textContent`), 'news.blocked.test', 'diagnosis reads the top-level page without additional permissions');
+  assert.equal(await evaluate(actionSession, `document.getElementById('diagnostic-summary').textContent`), '状态一致');
+  const popupSize = await evaluate(actionSession, `({
+    viewport: innerWidth,
+    height: innerHeight,
+    body: document.body.getBoundingClientRect().width,
+    titleHeight: document.querySelector('h1').getBoundingClientRect().height,
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+    footerBottom: document.querySelector('footer').getBoundingClientRect().bottom
+  })`);
+  assert.ok(popupSize.viewport >= 360 && popupSize.body >= 360 && popupSize.height >= 350 && popupSize.scrollWidth <= popupSize.clientWidth && popupSize.titleHeight < 36 && popupSize.footerBottom <= popupSize.height + 1,
+    `toolbar popup must have enough width for its content: ${JSON.stringify(popupSize)}`);
+  fs.mkdirSync(new URL('./artifacts/', import.meta.url), { recursive: true });
+  const actionScreenshot = await send('Page.captureScreenshot', { format: 'png' }, actionSession);
+  fs.writeFileSync(new URL('./artifacts/site-filter-toolbar-popup.png', import.meta.url), Buffer.from(actionScreenshot.data, 'base64'));
+  // The actual popup can be shorter than 600px. Its content must remain reachable
+  // between the sticky header and footer when the settings are expanded.
+  await evaluate(actionSession, `document.querySelector('.defaults').open = true; document.getElementById('layout').scrollIntoView({block:'center'});`);
+  assert.equal(await evaluate(actionSession, `(() => {
+    const header = document.querySelector('header').getBoundingClientRect();
+    const footer = document.querySelector('footer').getBoundingClientRect();
+    const field = document.getElementById('layout').getBoundingClientRect();
+    return field.top >= header.bottom && field.bottom <= footer.top && footer.bottom <= innerHeight + 1;
+  })()`), true, 'settings remain reachable in the toolbar popup');
+  await evaluate(actionSession, `document.getElementById('sites').value = 'news.blocked.test'; document.getElementById('save-reload').click();`);
+  await until(() => evaluate(actionHostSession, `document.readyState === 'complete' && document.getElementById('network')?.naturalWidth === 1 && getComputedStyle(document.getElementById('inline')).visibility === 'visible'`), 'save and refresh restores previously blocked CDN images');
+  await until(() => evaluate(workerSession, `chrome.action.getBadgeText({tabId:${actionTabId}}).then(text => text === 'PASS')`), 'site exclusion toolbar badge');
+  await evaluate(actionSession, `document.getElementById('refresh-diagnostic').click();`);
+  await until(() => evaluate(actionSession, `document.getElementById('diagnostic-summary').textContent === '状态一致' && document.getElementById('diagnostic-match').textContent === 'news.blocked.test'`), 'diagnosis confirms saved exclusion after refresh');
+  await evaluate(actionSession, `document.querySelector('.diagnostics').open = true; document.getElementById('diagnostic-reason').scrollIntoView({block:'center'});`);
+  const diagnosticScreenshot = await send('Page.captureScreenshot', { format: 'png' }, actionSession);
+  fs.writeFileSync(new URL('./artifacts/site-filter-diagnostics.png', import.meta.url), Buffer.from(diagnosticScreenshot.data, 'base64'));
+  await send('Target.closeTarget', { targetId: actionPopup.targetId });
+  await send('Page.enable', {}, actionHostSession);
+  await send('Page.navigate', { url: `http://other.blocked.test:${port}/` }, actionHostSession);
+  await until(() => evaluate(actionHostSession, `document.readyState === 'complete' && document.getElementById('inline') && getComputedStyle(document.getElementById('inline')).visibility === 'hidden'`), 'navigation leaves excluded third-level site');
+  await until(() => evaluate(workerSession, `chrome.action.getBadgeText({tabId:${actionTabId}}).then(text => text === 'ON')`), 'navigation updates the toolbar badge');
+  await settings({ enabled: true, siteMode: 'exclude', sites: [], strength: 'basic' });
+  await until(() => evaluate(workerSession, `chrome.action.getBadgeText({tabId:${actionTabId}}).then(text => text === 'IMG')`), 'basic toolbar badge after settings change');
+  await settings({ enabled: false, siteMode: 'exclude', sites: [] });
+  await until(() => evaluate(workerSession, `chrome.action.getBadgeText({tabId:${actionTabId}}).then(text => text === 'OFF')`), 'paused toolbar badge');
+  await settings({ enabled: true, siteMode: 'exclude', sites: [] });
+  await send('Target.closeTarget', { targetId: actionHostId });
   const { targetId: popupId } = await send('Target.createTarget', { url: worker.url.replace('background.js', 'popup.html') });
   const { sessionId: popupSession } = await send('Target.attachToTarget', { targetId: popupId, flatten: true });
   await until(() => evaluate(popupSession, `!!document.getElementById('sites') && !document.getElementById('sites').disabled`), 'popup initialization');
+  await evaluate(popupSession, `document.getElementById('sites').value = 'news.example.com'; document.getElementById('sites').dispatchEvent(new Event('input'));`);
+  assert.equal(await evaluate(popupSession, `document.getElementById('sites-count').textContent`), '1 / 500');
+  assert.match(await evaluate(popupSession, `document.getElementById('list-state').textContent`), /尚未保存/);
+  await evaluate(popupSession, `document.getElementById('sites').value = 'ftp://invalid.test'; document.getElementById('sites').dispatchEvent(new Event('input'));`);
+  assert.equal(await evaluate(popupSession, `document.getElementById('sites').getAttribute('aria-invalid')`), 'true');
+  await evaluate(popupSession, `document.getElementById('sites').value = ''; document.getElementById('sites').dispatchEvent(new Event('input'));`);
+  assert.equal(await evaluate(popupSession, `document.getElementById('sites').getAttribute('aria-invalid')`), 'false');
   await evaluate(popupSession, `document.getElementById('layout').value = 'collapse'; document.getElementById('layout').dispatchEvent(new Event('change'));`);
   await until(() => evaluate(workerSession, `(async () => (await chrome.storage.local.get('layout')).layout === 'collapse')()`), 'popup saves collapse layout');
   await until(() => evaluate(popupSession, `!document.getElementById('layout').disabled`), 'layout save complete');
@@ -253,11 +407,27 @@ try {
   await until(() => evaluate(popupSession, `document.getElementById('status').textContent.includes('设置已保存')`), 'real popup save');
   assert.equal((await evaluate(workerSession, 'chrome.storage.local.get("siteMode")')).siteMode, 'only');
   await checkPage('blocked.test', true);
-  await send('Emulation.setDeviceMetricsOverride', { width: 384, height: 780, deviceScaleFactor: 1, mobile: false }, popupSession);
+  await send('Emulation.setDeviceMetricsOverride', { width: 384, height: 600, deviceScaleFactor: 1, mobile: false }, popupSession);
+  assert.equal(await evaluate(popupSession, `document.documentElement.scrollWidth <= document.documentElement.clientWidth`), true, 'popup fits a narrow browser window');
+  await evaluate(popupSession, `document.querySelector('.defaults').open = true; window.scrollTo(0, document.documentElement.scrollHeight);`);
+  assert.equal(await evaluate(popupSession, `(() => {
+    const footer = document.querySelector('footer').getBoundingClientRect();
+    const select = document.getElementById('layout').getBoundingClientRect();
+    return footer.bottom <= innerHeight && select.bottom <= footer.top && select.top >= document.querySelector('header').getBoundingClientRect().bottom;
+  })()`), true, 'default controls scroll into view while refresh stays visible');
+  await evaluate(popupSession, `document.querySelector('.defaults').open = false; window.scrollTo(0, 0);`);
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, popupSession);
   const screenshot = await send('Page.captureScreenshot', { format: 'png' }, popupSession);
   fs.mkdirSync(new URL('./artifacts/', import.meta.url), { recursive: true });
   fs.writeFileSync(new URL('./artifacts/site-filter-popup.png', import.meta.url), Buffer.from(screenshot.data, 'base64'));
-  console.log('PASS: Chromium extension, site rules, CDN/frames, single network/data/responsive/shadow image reveal, temporary tab allowance, tab isolation, cleanup and popup save.');
+  await evaluate(popupSession, `window.scrollTo(0, document.documentElement.scrollHeight);`);
+  const rulesScreenshot = await send('Page.captureScreenshot', { format: 'png' }, popupSession);
+  fs.writeFileSync(new URL('./artifacts/site-filter-rules.png', import.meta.url), Buffer.from(rulesScreenshot.data, 'base64'));
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, popupSession);
+  await evaluate(popupSession, `window.scrollTo(0, 0);`);
+  const darkScreenshot = await send('Page.captureScreenshot', { format: 'png' }, popupSession);
+  fs.writeFileSync(new URL('./artifacts/site-filter-popup-dark.png', import.meta.url), Buffer.from(darkScreenshot.data, 'base64'));
+  console.log('PASS: Chromium extension, scan reuse, failure/retry, stale reveal replies, site rules, CDN/frames, network/data/responsive/shadow reveal, temporary allowance, tab isolation, cleanup and popup save.');
 } finally {
   await send('Browser.close').catch(() => {});
   socket?.close();

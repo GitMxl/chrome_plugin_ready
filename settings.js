@@ -101,5 +101,25 @@
     return site ? settings.siteStrengths[site] : settings.strength;
   }
 
-  globalThis.ImageFilterSettings = Object.freeze({ keys, normalizeSite, parseSites, normalize, hostname, matches, shouldBlock, rules, strengthFor });
+  function diagnose(settings, host, temporary = false) {
+    const matchedSite = settings.sites.filter(site => matches(host, [site])).sort((a, b) => b.length - a.length)[0] || "";
+    const strengthSite = Object.keys(settings.siteStrengths).filter(site => matches(host, [site])).sort((a, b) => b.length - a.length)[0] || "";
+    const strength = strengthFor(settings, host);
+    let code, reason;
+    if (!host) { code = "NA"; reason = "当前页面不支持网站规则或尚未连接页面"; }
+    else if (!settings.enabled) { code = "OFF"; reason = "总开关已暂停"; }
+    else if (temporary) { code = "TEMP"; reason = "当前标签页已临时放行"; }
+    else if (!shouldBlock(settings, host)) {
+      code = "PASS";
+      reason = settings.siteMode === "exclude" ? "命中不屏蔽的网站列表" : "未命中仅屏蔽的网站列表";
+    } else {
+      code = strength === "basic" ? "IMG" : "ON";
+      reason = settings.siteMode === "only" ? "命中仅屏蔽的网站列表" : "未命中不屏蔽的网站列表";
+    }
+    const blocked = code === "ON" || code === "IMG";
+    return { host, matchedSite, strengthSite, strength, code, reason, blocked,
+      label: blocked ? `${strength === "basic" ? "普通" : "严格"}屏蔽` : code === "NA" ? "不支持或未连接" : "正常显示图片" };
+  }
+
+  globalThis.ImageFilterSettings = Object.freeze({ keys, normalizeSite, parseSites, normalize, hostname, matches, shouldBlock, rules, strengthFor, diagnose });
 })();
